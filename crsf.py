@@ -22,7 +22,7 @@ TCP_PORT = 60950                # this TCP port is used by Fusion
 
 ORIGIN_ADDR = "CRSF.FC_ADDR"
 
-SERIAL_PORT = '/dev/tty.usbserial-AQ00MH7Z'
+SERIAL_PORT = 'COM8'
 SERIAL_BAUD = 416666
 # TODO: can also use WebSocket if Fusion is needed simultaneously
 
@@ -543,7 +543,73 @@ class SerialConnection(CRSFConnection):
 
     def write_crsf(self, frame):
         self.serial.write(frame.bytes)
+class TestConnection(CRSFConnection):
+    """Provides dummy CRSF data for testing when no real connections are available"""
+    
+    def __init__(self, silent):
+        self.parser = crsf_parser(silent)
+        self.frames = []
+        self.last_read_time = 0
+        self.ping_response_sent = False
+        self.silent = silent
+        
+    def read_crsf(self):
+        """Simulate reading CRSF frames"""
+        current_time = time.time()
+        
+        # Process any pending frames first
+        if self.frames:
+            return self.frames.pop(0)
+            
+        # Only return new data every 100ms
+        if current_time - self.last_read_time < 0.1:
+            return None
+            
+        self.last_read_time = current_time
+        
+        # Generate dummy link statistics every 100ms
+        link_stats = create_frame([
+            CRSF.MSG_TYPE_LINK_STATS,
+            50,  # RSSI
+            60,  # RSSI 2  
+            95,  # Link quality
+            10,  # SNR
+            1,   # Antenna
+            2,   # RF Mode
+            25,  # TX Power
+            45,  # RSSI downlink
+            92,  # Link quality downlink
+            8    # SNR downlink
+        ])
+        
+        return link_stats
 
+    def write_crsf(self, frame):
+        """Handle written frames and generate appropriate responses"""
+        if frame.type == CRSF.MSG_TYPE_PING:
+            # Respond to ping with device info
+            device_info = create_frame([
+                CRSF.MSG_TYPE_DEVICE_INFO,  # type
+                frame.origin,               # destination 
+                CRSF.TX_ADDR,              # origin
+                # Device name: "Test Device"
+                0x54, 0x65, 0x73, 0x74, 0x20, 0x44, 0x65, 0x76, 0x69, 0x63, 0x65, 0x00,
+                # Serial number
+                0x01, 0x02, 0x03, 0x04,
+                # Hardware ID
+                0x05, 0x06, 0x07, 0x08,
+                # Firmware ID  
+                0x09, 0x0A, 0x0B, 0x0C,
+                # Parameter count
+                0x05,
+                # Version
+                0x01
+            ])
+            
+            # Queue the response frame
+            self.frames.append(device_info)
+
+    
 def parse_args():
     '''Parse command line arguments'''
     import argparse, pathlib
@@ -552,14 +618,18 @@ def parse_args():
                          help = 'use TCP connection instead of UART' )
     arg_parse.add_argument('--menu', action = 'store_true',
                          help = 'CRSF menu mode (otherwise - logs mode)' )
+    arg_parse.add_argument('--test', action = 'store_true',
+                         help = 'CRSF test mode (otherwise - logs mode)' )
     opts = arg_parse.parse_args()
     return opts
 
-def get_crsf_connection(use_tcp, silent):
+def get_crsf_connection(mode, silent):
     if not silent:
-        print('Connecting with {}...'.format('TCP' if use_tcp else 'UART'))
-    if use_tcp:
+        print('Connecting with {}...'.format('TCP' if mode.tcp else 'UART'))
+    if mode.tcp:
         return TCPConnection(silent)
+    elif mode.test:
+        return TestConnection(silent)
     else:
         return SerialConnection(silent)
 
@@ -1050,7 +1120,7 @@ class CRSFMenu:
         self.last_sent = None
 
         # Open a connection for CRSF
-        self.conn = get_crsf_connection(opts.tcp, True)
+        self.conn = get_crsf_connection(opts, True)
 
         # Device addr (1-byte number) to CRSFDevice
         # - Common state
@@ -1545,6 +1615,10 @@ def crsf_menu_mode(stdscr, opts):
     man = CRSFMenu(stdscr, opts)
     man.run()
 
+def crsf_test_mode(stdscr, opts):
+    man = CRSFMenu(stdscr, opts)
+    man.run()
+
 if __name__ == '__main__':
     basename = os.path.basename(sys.argv[0])
     print('TBS Agent Python ({})\n--------------------------'.format(basename))
@@ -1552,5 +1626,7 @@ if __name__ == '__main__':
     opts = parse_args()
     if opts.menu:
         curses.wrapper(crsf_menu_mode, opts)
+    elif opts.test:
+        curses.wrapper(crsf_test_mode, opts)
     else:
         log_mode(opts.tcp)
